@@ -1,0 +1,21 @@
+# Build files
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ParaView / simulation outputs
+solution-*.vtu
+solution.pvd
+*.vtk
+*.vtu
+*.pvtu
+*.pvd
+
+# Temporary files
+*.o
+*.so
+*.a
+*.log
+.DS_Store
