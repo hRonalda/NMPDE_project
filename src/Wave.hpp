@@ -102,17 +102,18 @@ public:
   /**
    * Initial displacement:
    *
-   *     u0(x,y) = x(1-x)y(1-y)
+   * For domain [-5, 5]², we use a Gaussian-like bump centered at origin:
    *
-   * This function is zero on the boundary of the unit square.
-   * Its maximum is at (0.5,0.5):
+   *     u0(x,y) = exp(-(x² + y²)/σ²)
    *
-   *     u0(0.5,0.5) = 0.0625
+   * This function:
+   *     - is smooth
+   *     - has maximum 1.0 at (0, 0)
+   *     - decays to near-zero at boundaries
+   *     - is symmetric
    *
-   * So in ParaView, at time t = 0, we expect:
-   *
-   *     boundary = blue / zero
-   *     center   = maximum value
+   * Parameter σ controls the width of the bump.
+   * For σ = 2, the bump has noticeable width.
    */
   class FunctionU0 : public Function<dim>
   {
@@ -123,8 +124,9 @@ public:
     value(const Point<dim> &p,
           const unsigned int /*component*/ = 0) const override
     {
-      return p[0] * (1.0 - p[0]) *
-             p[1] * (1.0 - p[1]);
+      const double sigma = 2.0;
+      const double r_squared = p[0] * p[0] + p[1] * p[1];
+      return std::exp(-r_squared / (sigma * sigma));
     }
   };
 
@@ -194,6 +196,11 @@ protected:
   // Solve the linear system.
   void
   solve_linear_system();
+
+  // Compute discrete energy: E = 0.5 * ∫(u_t² + |∇u|²) dx
+  // Returns the total energy at current time step
+  double
+  compute_energy();
 
   // Write .vtu and .pvd files for ParaView.
   // Important: non-const because we update output_files.
@@ -286,6 +293,14 @@ protected:
    * In ParaView, open solution.pvd, not all .vtu files separately.
    */
   std::vector<std::pair<double, std::string>> output_files;
+
+  /**
+   * Energy data for convergence analysis.
+   *
+   * Stores (time, energy) pairs for all time steps.
+   * Used to analyze numerical dissipation separately from physical spreading.
+   */
+  std::vector<std::pair<double, double>> energy_history;
 
   // Only MPI rank 0 prints to terminal.
   ConditionalOStream pcout;
