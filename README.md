@@ -80,3 +80,15 @@ Choose one or more:
 ## Authors
 
 [Group members to be filled]
+
+
+
+## Branch documentation
+
+### v2.0-enhancements
+
+This branch extends the baseline solver with a Gaussian pulse test case on the domain `[-5,5]^2`, ParaView 3D visualization, and a mesh refinement / amplitude-loss study.
+
+Detailed documentation:
+
+[docs/v2.0-enhancements.md](docs/v2.0-enhancements.md)
