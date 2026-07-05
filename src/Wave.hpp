@@ -50,6 +50,71 @@ using namespace dealii;
 
 
 /**
+ * Manufactured exact solution for validation (see docs/validation.md).
+ *
+ * On the fixed domain Omega = [-5,5]^2 we use the Dirichlet eigenmode
+ *
+ *     u(x,y,t) = sin(a_k (x+5)) sin(a_m (y+5)) cos(omega t)
+ *
+ * with a_k = k pi / 10, a_m = m pi / 10, k and m positive integers.
+ *
+ * The sine factors vanish identically on all four edges x = +-5, y = +-5,
+ * so u satisfies the homogeneous Dirichlet condition g = 0 exactly.
+ *
+ * Substituting into u_tt - Lap(u) gives the required forcing:
+ *
+ *     f(x,y,t) = (a_k^2 + a_m^2 - omega^2)
+ *                * sin(a_k (x+5)) sin(a_m (y+5)) cos(omega t)
+ *
+ * Case A: omega = sqrt(a_k^2 + a_m^2)  ->  f = 0 (free vibration).
+ * Case B: any other omega (e.g. omega = 1)  ->  nonzero forcing,
+ *         which validates the load-vector assembly.
+ *
+ * The time is handled through Function::set_time() / get_time(), so the
+ * same object provides the initial condition u0 (at time 0) and the
+ * reference for the error computation (at the final time).
+ */
+class WaveExactSolution : public Function<2>
+{
+public:
+  WaveExactSolution(const unsigned int k,
+                    const unsigned int m,
+                    const double       omega_)
+    : a_k(k * numbers::PI / 10.0)
+    , a_m(m * numbers::PI / 10.0)
+    , omega(omega_)
+  {}
+
+  virtual double
+  value(const Point<2> &p, const unsigned int /*component*/ = 0) const override
+  {
+    return std::sin(a_k * (p[0] + 5.0)) * std::sin(a_m * (p[1] + 5.0)) *
+           std::cos(omega * get_time());
+  }
+
+  // Gradient, needed for the H1 error computation.
+  virtual Tensor<1, 2>
+  gradient(const Point<2> &p,
+           const unsigned int /*component*/ = 0) const override
+  {
+    const double ct = std::cos(omega * get_time());
+
+    Tensor<1, 2> grad;
+    grad[0] =
+      a_k * std::cos(a_k * (p[0] + 5.0)) * std::sin(a_m * (p[1] + 5.0)) * ct;
+    grad[1] =
+      a_m * std::sin(a_k * (p[0] + 5.0)) * std::cos(a_m * (p[1] + 5.0)) * ct;
+    return grad;
+  }
+
+private:
+  const double a_k;
+  const double a_m;
+  const double omega;
+};
+
+
+/**
  * Wave equation solver for PDE Project 2.
  *
  * We solve the 2D wave equation:
@@ -157,18 +222,30 @@ public:
    * T_          = final time.
    * delta_t_    = time step.
    * n_refine_   = global mesh refinement level.
-   * f_          = forcing term f(x). For now, we use f = 0.
+   * f_          = forcing term f(x, t). Pass nullptr for f = 0.
+   * u0_         = initial displacement u(x, 0).
+   * u1_         = initial velocity u_t(x, 0).
+   * exact_      = exact solution for the error computation at the final
+   *               time. Pass nullptr when no exact solution is known
+   *               (e.g. the Gaussian test case).
    */
-  Wave(const unsigned int                              &r_,
-       const double                                    &T_,
-       const double                                    &delta_t_,
-       const unsigned int                              &n_refine_,
-       const std::function<double(const Point<dim> &)> &f_)
+  Wave(const unsigned int                             &r_,
+       const double                                   &T_,
+       const double                                   &delta_t_,
+       const unsigned int                             &n_refine_,
+       const std::function<double(const Point<dim> &,
+                                  const double)>      &f_,
+       const std::shared_ptr<Function<dim>>           &u0_,
+       const std::shared_ptr<Function<dim>>           &u1_,
+       const std::shared_ptr<Function<dim>>           &exact_ = nullptr)
     : r(r_)
     , T(T_)
     , delta_t(delta_t_)
     , n_refine(n_refine_)
     , f(f_)
+    , u0(u0_)
+    , u1(u1_)
+    , exact_solution(exact_)
     , mpi_size(Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD))
     , mpi_rank(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD))
     , mesh(MPI_COMM_WORLD)
@@ -192,6 +269,16 @@ protected:
   // Assemble the linear system for one time step.
   void
   assemble();
+
+  // Assemble the load vector F(t)_i = (f(., t), phi_i).
+  // Sets load to zero when no forcing term was provided.
+  void
+  assemble_load_vector(const double t, TrilinosWrappers::MPI::Vector &load);
+
+  // Compute L2 and H1 errors against the exact solution at the current
+  // time. Does nothing if no exact solution was provided.
+  void
+  compute_errors();
 
   // Solve the linear system.
   void
@@ -225,9 +312,17 @@ protected:
   // Current time step index.
   unsigned int timestep_number = 0;
 
-  // Forcing term f(x).
-  // In the current first test, f = 0.
-  std::function<double(const Point<dim> &)> f;
+  // Forcing term f(x, t). Empty (nullptr) means f = 0.
+  std::function<double(const Point<dim> &, const double)> f;
+
+  // Initial displacement u(x, 0).
+  std::shared_ptr<Function<dim>> u0;
+
+  // Initial velocity u_t(x, 0).
+  std::shared_ptr<Function<dim>> u1;
+
+  // Exact solution for validation (nullptr if unknown).
+  std::shared_ptr<Function<dim>> exact_solution;
 
   // MPI information.
   const unsigned int mpi_size;

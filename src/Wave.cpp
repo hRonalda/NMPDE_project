@@ -32,17 +32,7 @@ Wave::run()
    *     solution_owned = U^0
    *     solution       = U^0
    */
-  VectorTools::interpolate(dof_handler, FunctionU0(), solution_owned);
-
-  solution_owned.compress(VectorOperation::insert);
-  solution = solution_owned;
-  
-  pcout << "DEBUG after interpolation:" << std::endl;
-  pcout << "  ||solution_owned||_linfty = "
-        << solution_owned.linfty_norm() << std::endl;
-  pcout << "  ||solution||_linfty = "
-        << solution.linfty_norm() << std::endl;
-
+  VectorTools::interpolate(dof_handler, *u0, solution_owned);
 
   solution_owned.compress(VectorOperation::insert);
   solution = solution_owned;
@@ -50,28 +40,64 @@ Wave::run()
   /**
    * Initialize previous time levels.
    *
-   * Central difference needs U^n and U^{n-1}.
+   * Central difference needs U^n and U^{n-1}. The ghost level U^{-1} is
+   * built from the Taylor expansion of the exact solution at t = 0:
    *
-   * For the first simple version, since initial velocity u1 = 0,
-   * we set:
+   *     U^{-1} = U^0 - dt U1 + 0.5 dt^2 A^0
    *
-   *     U^{-1} ≈ U^0
+   * where A^0 is the initial acceleration, obtained from the
+   * semi-discrete equation at t = 0:
    *
-   * This is a simple first working approximation.
+   *     M A^0 = F(0) - K U^0
    *
-   * Later, for higher accuracy, we can improve it using:
-   *
-   *     U^{-1} = U^0 - Δt U_t(0) + 0.5 Δt² U_tt(0)
-   *
-   * where:
-   *
-   *     M U_tt(0) = F(0) - K U^0
+   * This keeps the scheme second-order accurate also at the first step,
+   * and is what makes a nonzero initial velocity u1 work.
    */
   solution_old_owned = solution_owned;
   solution_old = solution_old_owned;
 
-  solution_old_old_owned = solution_owned;
-  solution_old_old = solution_old_old_owned;
+  {
+    // Initial velocity U1.
+    TrilinosWrappers::MPI::Vector u1_vec(solution_owned);
+    VectorTools::interpolate(dof_handler, *u1, u1_vec);
+    u1_vec.compress(VectorOperation::insert);
+
+    // RHS of the acceleration system: F(0) - K U^0.
+    TrilinosWrappers::MPI::Vector accel_rhs(solution_owned);
+    assemble_load_vector(0.0, accel_rhs);
+
+    TrilinosWrappers::MPI::Vector K_u0(solution_owned);
+    stiffness_matrix.vmult(K_u0, solution_owned);
+    accel_rhs -= K_u0;
+
+    // Solve M A^0 = F(0) - K U^0, with A^0 = 0 on the boundary
+    // (consistent with time-independent Dirichlet data g = 0).
+    system_matrix.copy_from(mass_matrix);
+
+    TrilinosWrappers::MPI::Vector accel(solution_owned);
+
+    std::map<types::global_dof_index, double> boundary_values;
+    VectorTools::interpolate_boundary_values(dof_handler,
+                                             0,
+                                             Functions::ZeroFunction<dim>(),
+                                             boundary_values);
+    MatrixTools::apply_boundary_values(boundary_values,
+                                       system_matrix,
+                                       accel,
+                                       accel_rhs);
+
+    SolverControl solver_control(10000, 1e-10);
+    SolverCG<TrilinosWrappers::MPI::Vector> solver(solver_control);
+    TrilinosWrappers::PreconditionJacobi preconditioner;
+    preconditioner.initialize(system_matrix);
+    solver.solve(system_matrix, accel, accel_rhs, preconditioner);
+
+    // U^{-1} = U^0 - dt U1 + 0.5 dt^2 A^0.
+    solution_old_old_owned = solution_owned;
+    solution_old_old_owned.add(-delta_t, u1_vec);
+    solution_old_old_owned.add(0.5 * delta_t * delta_t, accel);
+    solution_old_old = solution_old_old_owned;
+  }
 
   // Output initial condition solution-0000.vtu.
   // In ParaView this should show a smooth bump:
@@ -94,7 +120,9 @@ Wave::run()
    *
    * 4. output the new solution
    */
-  while (time < T)
+  // The 0.5 * delta_t guard protects against floating-point accumulation
+  // in "time" adding a spurious extra step when delta_t divides T exactly.
+  while (time < T - 0.5 * delta_t)
   {
     time += delta_t;
     ++timestep_number;
@@ -138,6 +166,9 @@ Wave::run()
     energy_file.close();
     pcout << "Energy history saved to energy_history.txt" << std::endl;
   }
+
+  // Validation: compare against the exact solution, if one was provided.
+  compute_errors();
 
   pcout << "Simulation completed." << std::endl;
 }
@@ -438,12 +469,20 @@ Wave::assemble()
   system_rhs -= K_un;
 
   /**
-   * If we later want nonzero forcing f(x), this is where we should add:
+   * Forcing contribution:
    *
    *     system_rhs += Δt² F^n
    *
-   * For now, f = 0, so nothing is added.
+   * The scheme is centered at t_n; since "time" has already been advanced
+   * to t_{n+1} in the time loop, the load vector is evaluated at
+   * t_n = time - Δt.
    */
+  if (f)
+  {
+    TrilinosWrappers::MPI::Vector load(solution_owned);
+    assemble_load_vector(time - delta_t, load);
+    system_rhs.add(dt2, load);
+  }
 
   /**
    * Homogeneous Dirichlet boundary condition:
@@ -472,6 +511,107 @@ Wave::assemble()
                                      system_matrix,
                                      solution_owned,
                                      system_rhs);
+}
+
+
+void
+Wave::assemble_load_vector(const double t, TrilinosWrappers::MPI::Vector &load)
+{
+  /**
+   * Assemble the discrete load vector at time t:
+   *
+   *     F(t)_i = ∫_Ω f(x, t) φ_i(x) dx
+   */
+  load = 0.0;
+
+  if (!f)
+    return;
+
+  const unsigned int dofs_per_cell = fe->dofs_per_cell;
+  const unsigned int n_q = quadrature->size();
+
+  FEValues<dim> fe_values(*fe,
+                          *quadrature,
+                          update_values |
+                          update_quadrature_points |
+                          update_JxW_values);
+
+  Vector<double> cell_rhs(dofs_per_cell);
+  std::vector<types::global_dof_index> dof_indices(dofs_per_cell);
+
+  for (const auto &cell : dof_handler.active_cell_iterators())
+  {
+    if (!cell->is_locally_owned())
+      continue;
+
+    fe_values.reinit(cell);
+    cell_rhs = 0.0;
+
+    for (unsigned int q = 0; q < n_q; ++q)
+    {
+      const double f_q = f(fe_values.quadrature_point(q), t);
+
+      for (unsigned int i = 0; i < dofs_per_cell; ++i)
+        cell_rhs(i) += f_q *
+                       fe_values.shape_value(i, q) *
+                       fe_values.JxW(q);
+    }
+
+    cell->get_dof_indices(dof_indices);
+    load.add(dof_indices, cell_rhs);
+  }
+
+  load.compress(VectorOperation::add);
+}
+
+
+void
+Wave::compute_errors()
+{
+  if (!exact_solution)
+    return;
+
+  /**
+   * Compare the discrete solution against the exact solution at the
+   * current (final) time, in the L2 norm and the H1 seminorm:
+   *
+   *     e_L2 = ||u_h - u_ex||_L2
+   *     e_H1 = ||grad(u_h - u_ex)||_L2
+   *
+   * A higher-order quadrature (r + 2) is used so that the quadrature
+   * error does not pollute the measured discretization error.
+   */
+  exact_solution->set_time(time);
+
+  const QGauss<dim> error_quadrature(r + 2);
+
+  Vector<double> difference_per_cell(mesh.n_active_cells());
+
+  VectorTools::integrate_difference(dof_handler,
+                                    solution,
+                                    *exact_solution,
+                                    difference_per_cell,
+                                    error_quadrature,
+                                    VectorTools::L2_norm);
+  const double error_L2 =
+    VectorTools::compute_global_error(mesh,
+                                      difference_per_cell,
+                                      VectorTools::L2_norm);
+
+  VectorTools::integrate_difference(dof_handler,
+                                    solution,
+                                    *exact_solution,
+                                    difference_per_cell,
+                                    error_quadrature,
+                                    VectorTools::H1_seminorm);
+  const double error_H1 =
+    VectorTools::compute_global_error(mesh,
+                                      difference_per_cell,
+                                      VectorTools::H1_seminorm);
+
+  pcout << "Errors vs exact solution at t = " << time << ":" << std::endl;
+  pcout << "  L2 error          = " << error_L2 << std::endl;
+  pcout << "  H1 seminorm error = " << error_H1 << std::endl;
 }
 
 
