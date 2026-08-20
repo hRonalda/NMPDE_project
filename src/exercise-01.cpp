@@ -69,6 +69,15 @@ main(int argc, char *argv[])
      * Gaussian bump released from rest, f = 0.
      *
      * No exact solution is available, so no error is computed.
+     *
+     * Note on interpreting this run: the decay of the center amplitude
+     * (about 1.0 -> 0.52 by t = 1) is PHYSICAL, caused by the wave
+     * spreading in 2D; it is not numerical dissipation. The central
+     * difference scheme is non-dissipative (the discrete energy is
+     * conserved up to bounded oscillation, see energy_history.txt and
+     * docs/validation.md). What does differ between mesh levels is
+     * numerical DISPERSION: mesh-dependent phase error that distorts
+     * the wave shape, decreasing as O(h^2).
      */
     const double final_time = 1.0;
     const double time_step = 0.01;

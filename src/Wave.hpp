@@ -39,6 +39,7 @@
 // Standard C++ headers.
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -284,8 +285,10 @@ protected:
   void
   solve_linear_system();
 
-  // Compute discrete energy: E = 0.5 * ∫(u_t² + |∇u|²) dx
-  // Returns the total energy at current time step
+  // Discrete energy E^n = 1/2 (V^n·M V^n + U^n·K U^n) with the centered
+  // velocity V^n = (U^{n+1} - U^{n-1}) / (2 Δt). Must be called after the
+  // solve and before the time levels are shifted; returns E at t_n, one
+  // step behind the already-advanced "time".
   double
   compute_energy();
 
@@ -390,10 +393,11 @@ protected:
   std::vector<std::pair<double, std::string>> output_files;
 
   /**
-   * Energy data for convergence analysis.
+   * Energy history: (t_n, E^n) pairs for all time steps.
    *
-   * Stores (time, energy) pairs for all time steps.
-   * Used to analyze numerical dissipation separately from physical spreading.
+   * Central differences are non-dissipative, so E^n should stay flat
+   * (bounded oscillation, no drift). A decaying center amplitude with
+   * flat energy is physical spreading, not numerical dissipation.
    */
   std::vector<std::pair<double, double>> energy_history;
 

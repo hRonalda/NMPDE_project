@@ -131,3 +131,46 @@ velocity.
   `VectorTools::integrate_difference` with quadrature of order r + 2.
 - Expected rates for Q1 elements + central differences:
   L2 error = O(h^2), H1 error = O(h).
+
+## Energy conservation (non-dissipativity of central differences)
+
+The discrete energy of the semi-discrete system is
+
+```
+E^n = 1/2 ( V^n . M V^n + U^n . K U^n ),
+V^n = (U^{n+1} - U^{n-1}) / (2 dt)
+```
+
+the FEM counterpart of `E(t) = 1/2 integral(u_t^2 + |grad u|^2) dx`.
+It is computed in `Wave::compute_energy()` reusing the assembled M and
+K, and written to `energy_history.txt`.
+
+The central difference (leapfrog) scheme is non-dissipative: within the
+stability limit its amplification factors lie exactly on the unit
+circle, so E^n must stay flat -- a bounded oscillation of size O(dt^2)
+around the exact energy, with no drift. Measured on Case A over one
+full period (T = 10 sqrt(2), dt ~= 0.2 h):
+
+```
+n_refine       dt       E^0 = E^end     (max-min)/E^0
+   4        0.12405     2.44373         7.6e-04
+   5        0.06230     2.46146         1.9e-04
+   6        0.03122     2.46592         4.8e-05
+```
+
+Observations for the report:
+
+- E at the end of the period returns to its initial value to ~7
+  significant digits at every level; the linear-fit drift over the
+  period is < 2e-05 of E^0 and shrinks under refinement -> no
+  dissipation.
+- The oscillation amplitude decreases by a factor ~4 per halving of dt:
+  the expected O(dt^2) bounded oscillation of leapfrog.
+- E^0 converges to the exact continuous energy of the mode,
+  E = pi^2 / 4 ~= 2.46740 (for k = m = 1: E = lambda * 25 / 2 with
+  lambda = 2 pi^2 / 100, since integral(S^2) = 25 over [-5,5]^2).
+
+Consequence: in the Gaussian test case the decay of the center
+amplitude is physical 2D spreading (energy leaves the center, not the
+domain); the scheme's actual numerical error there is DISPERSION
+(mesh-dependent phase error), not dissipation.

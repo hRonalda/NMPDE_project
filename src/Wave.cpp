@@ -99,11 +99,13 @@ Wave::run()
     solution_old_old = solution_old_old_owned;
   }
 
-  // Output initial condition solution-0000.vtu.
-  // In ParaView this should show a smooth bump:
-  // boundary = 0, center ≈ 0.0625.
-  double initial_energy = compute_energy();
-  energy_history.push_back({time, initial_energy});
+  /**
+   * Output the initial condition solution-0000.vtu.
+   *
+   * No energy is recorded here: the centered velocity
+   * V^n = (U^{n+1} - U^{n-1}) / (2 Δt) needs U^1, which does not exist
+   * yet. The first loop iteration records E^0 (at t = 0) instead.
+   */
   output();
 
   /**
@@ -134,6 +136,13 @@ Wave::run()
     solve_linear_system();
 
     /**
+     * Energy at t_n = time - Δt, computed BEFORE the shift below while
+     * all three time levels U^{n+1}, U^n, U^{n-1} are still available
+     * (see compute_energy). The first iteration records E^0.
+     */
+    energy_history.push_back({time - delta_t, compute_energy()});
+
+    /**
      * IMPORTANT FIX:
      *
      * We update both owned and ghosted vectors.
@@ -147,10 +156,6 @@ Wave::run()
     solution_old_owned = solution_owned;
     solution_old = solution_old_owned;
 
-    // Compute and store energy
-    double current_energy = compute_energy();
-    energy_history.push_back({time, current_energy});
-
     output();
   }
 
@@ -158,6 +163,7 @@ Wave::run()
   if (mpi_rank == 0)
   {
     std::ofstream energy_file("energy_history.txt");
+    energy_file << std::setprecision(15);
     energy_file << "# time energy\n";
     for (const auto &[t, e] : energy_history)
     {
@@ -667,15 +673,46 @@ double
 Wave::compute_energy()
 {
   /**
-   * Compute discrete energy. For now, return a placeholder.
-   * Energy computation will be implemented in a future version.
+   * Discrete energy of the semi-discrete wave equation:
    *
-   * This avoids compilation issues with vector API while keeping
-   * the convergence study running. Energy history will be computed
-   * from output data in post-processing.
+   *     E^n = 1/2 ( V^n · M V^n  +  U^n · K U^n )
+   *
+   * which is the FEM counterpart of E(t) = 1/2 ∫ (u_t² + |∇u|²) dx.
+   *
+   * The velocity is the centered difference
+   *
+   *     V^n = (U^{n+1} - U^{n-1}) / (2 Δt)
+   *
+   * so this function needs all three time levels and MUST be called
+   * after solve_linear_system() but BEFORE the old solutions are
+   * shifted, i.e. while:
+   *
+   *     solution_owned         = U^{n+1}
+   *     solution_old_owned     = U^n
+   *     solution_old_old_owned = U^{n-1}
+   *
+   * The result is the energy at t_n (one step behind the current
+   * "time", which has already been advanced to t_{n+1}).
+   *
+   * M and K are the matrices assembled once in assemble_matrices();
+   * nothing is reassembled here.
    */
-  double placeholder_energy = solution_owned.linfty_norm();
-  return placeholder_energy;
+  TrilinosWrappers::MPI::Vector velocity(solution_owned);
+  velocity = solution_owned;
+  velocity -= solution_old_old_owned;
+  velocity *= 1.0 / (2.0 * delta_t);
+
+  TrilinosWrappers::MPI::Vector tmp(solution_owned);
+
+  // Kinetic part: 1/2 V·M V. The vector-vector product is MPI-global.
+  mass_matrix.vmult(tmp, velocity);
+  const double kinetic = 0.5 * (velocity * tmp);
+
+  // Potential part: 1/2 U^n·K U^n.
+  stiffness_matrix.vmult(tmp, solution_old_owned);
+  const double potential = 0.5 * (solution_old_owned * tmp);
+
+  return kinetic + potential;
 }
 
 
