@@ -799,11 +799,6 @@ Wave::compute_energy()
 void
 Wave::output()
 {
-  pcout << "DEBUG output at time " << time
-      << ", timestep " << timestep_number
-      << ", ||solution||_linfty = "
-      << solution.linfty_norm()
-      << std::endl;
   /**
    * Output to ParaView.
    *

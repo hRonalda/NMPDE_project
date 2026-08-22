@@ -137,3 +137,10 @@ energy conservation, dispersion, and the CFL limit are all derived
 
 **What remains is the report itself** (`text/` is currently empty) —
 the numerical content above is ready to be assembled into it.
+
+## Authors
+Salvatore Mariano Librici - salvatoremariano.librici@mail.polimi.it
+Rong Huang - rong.huang@mail.polimi.it
+Hirdesh Kumar - hirdesh.kumar@mail.polimi.it
+Mehdi Ghiasipour - mehdi.ghiasipour@mail.polimi.it
+
