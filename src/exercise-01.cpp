@@ -42,6 +42,14 @@ main(int argc, char *argv[])
    *         is nonzero. Validates the load-vector assembly.
    *         Runs for one forcing period T = 2 pi.
    *
+   *     caseC
+   *         Same spatial mode and same omega as caseA (free vibration,
+   *         f = 0), but the exact solution is
+   *         u = sin(a_k (x+5)) sin(a_m (y+5)) sin(omega t) instead of
+   *         cos(omega t), giving u0 = 0 and u1 = omega * S(x,y) instead
+   *         of caseA's u0 = S, u1 = 0. Validates the nonzero-u1 branch
+   *         of the Taylor startup for U^{-1} (docs/validation.md).
+   *
    * For the validation cases the time step is tied to the mesh size,
    * dt ~= 0.2 h, safely below the central-difference stability limit
    * (approximately dt <= 0.41 h for Q1 with consistent mass), so that
@@ -171,10 +179,65 @@ main(int argc, char *argv[])
 
     wave_solver.run();
   }
+  else if (test_case == "caseC")
+  {
+    /**
+     * Sine-in-time variant of the caseA mode (derivation in
+     * docs/validation.md): same spatial mode S(x,y) and same omega as
+     * caseA (the eigenfrequency, so f = 0), but
+     *
+     *     u(x,y,t) = sin(a_k (x+5)) sin(a_m (y+5)) sin(omega t)
+     *
+     * instead of cos(omega t). This flips which initial datum is
+     * nonzero: u0 = 0, u1 = omega * S(x,y), instead of caseA's u0 = S,
+     * u1 = 0. It exercises the nonzero-u1 branch of the Taylor startup
+     * for U^{-1} in Wave::run(), which caseA and caseB never touch
+     * (both use u1 = 0).
+     */
+    const unsigned int k = 1;
+    const unsigned int m = 1;
+    const double a_k = k * numbers::PI / 10.0;
+    const double a_m = m * numbers::PI / 10.0;
+    const double lambda = a_k * a_k + a_m * a_m;
+    const double omega = std::sqrt(lambda); // eigenfrequency -> f = 0
+
+    // One full period of the exact solution.
+    const double final_time = 2.0 * numbers::PI / omega;
+
+    // Tie dt to h: dt = T / n_steps with n_steps chosen so dt <= 0.2 h.
+    const double h = 10.0 / (1 << n_refine);
+    const unsigned int n_steps =
+      static_cast<unsigned int>(std::ceil(final_time / (0.2 * h)));
+    const double time_step = final_time / n_steps;
+
+    std::cout << "  omega = " << omega
+              << ", T = " << final_time
+              << ", h = " << h
+              << ", dt = " << time_step
+              << " (dt/h = " << time_step / h << ")"
+              << ", n_steps = " << n_steps << std::endl;
+
+    // use_sine = true selects sin(omega t) instead of cos(omega t).
+    auto exact = std::make_shared<WaveExactSolution>(k, m, omega, true);
+
+    auto u0 = std::make_shared<Functions::ZeroFunction<2>>();
+    auto u1 = std::make_shared<WaveEigenmodeVelocity>(k, m, omega);
+
+    Wave wave_solver(polynomial_degree,
+                     final_time,
+                     time_step,
+                     n_refine,
+                     nullptr, // f = 0 (same omega as caseA)
+                     u0,
+                     u1,
+                     exact);
+
+    wave_solver.run();
+  }
   else
   {
     std::cerr << "Unknown test case '" << test_case
-              << "'. Valid: gaussian, caseA, caseB." << std::endl;
+              << "'. Valid: gaussian, caseA, caseB, caseC." << std::endl;
     return 1;
   }
 

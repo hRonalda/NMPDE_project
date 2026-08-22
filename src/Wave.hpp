@@ -55,21 +55,29 @@ using namespace dealii;
  *
  * On the fixed domain Omega = [-5,5]^2 we use the Dirichlet eigenmode
  *
- *     u(x,y,t) = sin(a_k (x+5)) sin(a_m (y+5)) cos(omega t)
+ *     u(x,y,t) = sin(a_k (x+5)) sin(a_m (y+5)) cos(omega t)      [use_sine = false]
+ *     u(x,y,t) = sin(a_k (x+5)) sin(a_m (y+5)) sin(omega t)      [use_sine = true]
  *
  * with a_k = k pi / 10, a_m = m pi / 10, k and m positive integers.
  *
  * The sine factors vanish identically on all four edges x = +-5, y = +-5,
- * so u satisfies the homogeneous Dirichlet condition g = 0 exactly.
+ * so u satisfies the homogeneous Dirichlet condition g = 0 exactly,
+ * regardless of the time factor (cos or sin).
  *
- * Substituting into u_tt - Lap(u) gives the required forcing:
+ * Substituting into u_tt - Lap(u) gives the required forcing, with the
+ * SAME coefficient (a_k^2 + a_m^2 - omega^2) in both cases:
  *
  *     f(x,y,t) = (a_k^2 + a_m^2 - omega^2)
- *                * sin(a_k (x+5)) sin(a_m (y+5)) cos(omega t)
+ *                * sin(a_k (x+5)) sin(a_m (y+5)) {cos, sin}(omega t)
  *
- * Case A: omega = sqrt(a_k^2 + a_m^2)  ->  f = 0 (free vibration).
- * Case B: any other omega (e.g. omega = 1)  ->  nonzero forcing,
- *         which validates the load-vector assembly.
+ * Case A: cos(omega t), omega = sqrt(a_k^2 + a_m^2) -> f = 0 (free
+ *         vibration); u0 = S, u1 = 0.
+ * Case B: cos(omega t), any other omega (e.g. omega = 1) -> nonzero
+ *         forcing, which validates the load-vector assembly.
+ * Case C: sin(omega t), same omega as case A -> f = 0 again, but now
+ *         u0 = 0, u1 = omega * S: this exercises the nonzero-u1 branch
+ *         of the Taylor startup for U^{-1} in Wave::run(), which cases
+ *         A and B never touch.
  *
  * The time is handled through Function::set_time() / get_time(), so the
  * same object provides the initial condition u0 (at time 0) and the
@@ -80,7 +88,61 @@ class WaveExactSolution : public Function<2>
 public:
   WaveExactSolution(const unsigned int k,
                     const unsigned int m,
-                    const double       omega_)
+                    const double       omega_,
+                    const bool         use_sine_ = false)
+    : a_k(k * numbers::PI / 10.0)
+    , a_m(m * numbers::PI / 10.0)
+    , omega(omega_)
+    , use_sine(use_sine_)
+  {}
+
+  virtual double
+  value(const Point<2> &p, const unsigned int /*component*/ = 0) const override
+  {
+    const double time_factor = use_sine ? std::sin(omega * get_time())
+                                        : std::cos(omega * get_time());
+    return std::sin(a_k * (p[0] + 5.0)) * std::sin(a_m * (p[1] + 5.0)) *
+           time_factor;
+  }
+
+  // Gradient, needed for the H1 error computation.
+  virtual Tensor<1, 2>
+  gradient(const Point<2> &p,
+           const unsigned int /*component*/ = 0) const override
+  {
+    const double time_factor = use_sine ? std::sin(omega * get_time())
+                                        : std::cos(omega * get_time());
+
+    Tensor<1, 2> grad;
+    grad[0] =
+      a_k * std::cos(a_k * (p[0] + 5.0)) * std::sin(a_m * (p[1] + 5.0)) *
+      time_factor;
+    grad[1] =
+      a_m * std::sin(a_k * (p[0] + 5.0)) * std::cos(a_m * (p[1] + 5.0)) *
+      time_factor;
+    return grad;
+  }
+
+private:
+  const double a_k;
+  const double a_m;
+  const double omega;
+  const bool   use_sine;
+};
+
+
+/**
+ * Initial velocity u1 = omega * S(x,y) for the sin(omega t) variant
+ * (case C) of WaveExactSolution: the time derivative of
+ * S(x,y) sin(omega t) at t = 0 is omega * S(x,y) * cos(0) = omega * S(x,y).
+ * Time-independent, so this is a plain (non-time-dependent) Function.
+ */
+class WaveEigenmodeVelocity : public Function<2>
+{
+public:
+  WaveEigenmodeVelocity(const unsigned int k,
+                        const unsigned int m,
+                        const double       omega_)
     : a_k(k * numbers::PI / 10.0)
     , a_m(m * numbers::PI / 10.0)
     , omega(omega_)
@@ -89,23 +151,8 @@ public:
   virtual double
   value(const Point<2> &p, const unsigned int /*component*/ = 0) const override
   {
-    return std::sin(a_k * (p[0] + 5.0)) * std::sin(a_m * (p[1] + 5.0)) *
-           std::cos(omega * get_time());
-  }
-
-  // Gradient, needed for the H1 error computation.
-  virtual Tensor<1, 2>
-  gradient(const Point<2> &p,
-           const unsigned int /*component*/ = 0) const override
-  {
-    const double ct = std::cos(omega * get_time());
-
-    Tensor<1, 2> grad;
-    grad[0] =
-      a_k * std::cos(a_k * (p[0] + 5.0)) * std::sin(a_m * (p[1] + 5.0)) * ct;
-    grad[1] =
-      a_m * std::sin(a_k * (p[0] + 5.0)) * std::cos(a_m * (p[1] + 5.0)) * ct;
-    return grad;
+    return omega * std::sin(a_k * (p[0] + 5.0)) *
+           std::sin(a_m * (p[1] + 5.0));
   }
 
 private:
