@@ -413,6 +413,32 @@ Notes on the runs:
 
 ---
 
+## Note: energy with non-homogeneous boundary data (g != 0)
+
+The non-dissipativity result above (flat discrete energy, Part 2's
+unit-circle amplification factors) is a statement about the HOMOGENEOUS
+problem. With a non-homogeneous Dirichlet datum u = g on the boundary
+(case D), the boundary does work on the system:
+
+    dE/dt = integral over boundary of ( u_t * du/dn ) ds   (for f = 0)
+
+which vanishes only when u_t = 0 on the boundary -- i.e. for g = 0 or
+static-in-time g. For time-dependent g (case D: g oscillating at the
+mode frequency) this power input/output is nonzero, so the discrete
+energy E^n computed by `Wave::compute_energy()` genuinely oscillates
+over the period. THIS IS PHYSICS, NOT DISSIPATION: a non-flat energy
+trace in case D is the correct behavior of the exact solution, not a
+numerical artifact, and must not be read as a regression of the scheme.
+
+Consequently:
+
+- The flat-energy non-dissipativity check (the energy table and figure
+  in `docs/validation.md`) is meaningful exactly for the g = 0 cases
+  (A, B, C, Gaussian) and would also hold for a static nonzero g.
+- `compute_energy()` itself is unchanged -- it computes the same
+  quadratic form regardless of the boundary data; only the
+  interpretation of its output changes when g is time-dependent.
+
 ## How the measurements were made
 
 No solver source file was modified for any measurement.

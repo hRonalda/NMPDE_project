@@ -70,17 +70,54 @@ Wave::run()
     stiffness_matrix.vmult(K_u0, solution_owned);
     accel_rhs -= K_u0;
 
-    // Solve M A^0 = F(0) - K U^0, with A^0 = 0 on the boundary
-    // (consistent with time-independent Dirichlet data g = 0).
+    /**
+     * Solve M A^0 = F(0) - K U^0.
+     *
+     * Boundary values for A^0: the acceleration on the boundary is the
+     * second time derivative of the Dirichlet datum, g_tt(0). For
+     * g = 0 (boundary_g == nullptr) this is zero, as before. For
+     * time-dependent g it is generally NONZERO, and imposing zero here
+     * (the old behavior) injects a first-step error. We impose the
+     * centered second difference
+     *
+     *     A^0 |_bd = ( g(dt) - 2 g(0) + g(-dt) ) / dt^2
+     *
+     * which is consistent with the leapfrog stencil itself.
+     */
     system_matrix.copy_from(mass_matrix);
 
     TrilinosWrappers::MPI::Vector accel(solution_owned);
 
+    // Boundary-node values of g at t = -dt, 0, +dt (all empty maps
+    // remain zero-filled in the homogeneous case).
+    std::map<types::global_dof_index, double> g_minus, g_zero, g_plus;
     std::map<types::global_dof_index, double> boundary_values;
-    VectorTools::interpolate_boundary_values(dof_handler,
-                                             0,
-                                             Functions::ZeroFunction<dim>(),
-                                             boundary_values);
+
+    if (boundary_g)
+    {
+      boundary_g->set_time(-delta_t);
+      VectorTools::interpolate_boundary_values(dof_handler, 0,
+                                               *boundary_g, g_minus);
+      boundary_g->set_time(0.0);
+      VectorTools::interpolate_boundary_values(dof_handler, 0,
+                                               *boundary_g, g_zero);
+      boundary_g->set_time(delta_t);
+      VectorTools::interpolate_boundary_values(dof_handler, 0,
+                                               *boundary_g, g_plus);
+
+      for (const auto &[dof, g0] : g_zero)
+        boundary_values[dof] =
+          (g_plus[dof] - 2.0 * g0 + g_minus[dof]) /
+          (delta_t * delta_t);
+    }
+    else
+    {
+      VectorTools::interpolate_boundary_values(dof_handler,
+                                               0,
+                                               Functions::ZeroFunction<dim>(),
+                                               boundary_values);
+    }
+
     MatrixTools::apply_boundary_values(boundary_values,
                                        system_matrix,
                                        accel,
@@ -96,6 +133,28 @@ Wave::run()
     solution_old_old_owned = solution_owned;
     solution_old_old_owned.add(-delta_t, u1_vec);
     solution_old_old_owned.add(0.5 * delta_t * delta_t, accel);
+
+    /**
+     * Enforce the boundary invariant of the constrained leapfrog
+     * scheme: every stored time level must carry the boundary values of
+     * g at ITS OWN time, because the per-step right-hand side
+     * 2 M U^n - M U^{n-1} - dt^2 K U^n reads them (that is how the
+     * boundary-acceleration coupling enters -- see assemble()). For
+     * U^{-1} that means g(-dt). With compatible data (u0|_bd = g(0),
+     * u1|_bd = g_t(0)) the Taylor construction above already matches
+     * g(-dt) to O(dt^3); overwriting makes it exact by construction.
+     * In the homogeneous case (boundary_g == nullptr) the boundary
+     * entries are already exactly zero, so nothing to do.
+     */
+    if (boundary_g)
+    {
+      const IndexSet &owned = dof_handler.locally_owned_dofs();
+      for (const auto &[dof, g_val] : g_minus)
+        if (owned.is_element(dof))
+          solution_old_old_owned[dof] = g_val;
+      solution_old_old_owned.compress(VectorOperation::insert);
+    }
+
     solution_old_old = solution_old_old_owned;
   }
 
@@ -197,8 +256,8 @@ Wave::setup()
    * Therefore, the correct finite element is FE_Q.
    * Do NOT use FE_SimplexP here, because FE_SimplexP is for simplex/triangle meshes.
    *
-   * Note: For the larger domain, we may need more refinement to maintain
-   * similar mesh density as [0,1]² with n_refine=3.
+   * Mesh density: h = 10 / 2^n_refine (domain side length 10). The
+   * validation cases (docs/validation.md) use n_refine = 3..6.
    */
   Triangulation<dim> temp_mesh;
   GridGenerator::hyper_cube(temp_mesh, -5.0, 5.0);
@@ -430,7 +489,9 @@ Wave::assemble()
    *     system_matrix = M
    *     system_rhs    = 2M U^n - M U^{n-1} - Δt² K U^n
    *
-   * For the first test, f = 0, so Δt² F^n is not added.
+   * The Δt² F^n term is added below ("Forcing contribution") only when
+   * a forcing function f was provided; it is omitted entirely when
+   * f = 0 (nullptr).
    */
   const double dt2 = delta_t * delta_t;
 
@@ -491,27 +552,46 @@ Wave::assemble()
   }
 
   /**
-   * Homogeneous Dirichlet boundary condition:
+   * Dirichlet boundary condition:
    *
-   *     u = 0 on ∂Ω
+   *     u = g on ∂Ω     (g = 0 when boundary_g is nullptr)
    *
-   * IMPORTANT FIX:
+   * The constraint applies to the unknown U^{n+1}, which lives at
+   * t_{n+1} = "time" (the time loop advances "time" before calling
+   * assemble()). So g is evaluated at "time", NOT at time - Δt where
+   * the load vector is evaluated: the load is centered at t_n, the
+   * boundary constraint pins the new value.
    *
-   * Before, the code only set:
+   * MatrixTools::apply_boundary_values performs the SYMMETRIC
+   * elimination: boundary rows become identity (so the solve returns
+   * exactly U_B^{n+1} = g(t_{n+1}) at boundary DoFs), and the boundary
+   * columns are eliminated into the interior right-hand side
+   * (rhs_I -= M_IB g^{n+1}). Combined with the full-vector history in
+   * the RHS above (whose boundary entries carry g^n and g^{n-1}), this
+   * reproduces the correct constrained leapfrog step including the
+   * boundary-acceleration coupling M_IB (g^{n+1} - 2 g^n + g^{n-1})/Δt²
+   * -- no lifting function is needed. See docs/analysis.md.
    *
-   *     system_rhs[dof] = 0
-   *     system_matrix.set(dof, dof, 1)
-   *
-   * but this does not properly eliminate boundary DoFs.
-   *
-   * MatrixTools::apply_boundary_values is safer.
+   * The symmetric elimination also preserves the SPD structure of the
+   * system, so the CG solver remains valid.
    */
   std::map<types::global_dof_index, double> boundary_values;
 
-  VectorTools::interpolate_boundary_values(dof_handler,
-                                           0,
-                                           Functions::ZeroFunction<dim>(),
-                                           boundary_values);
+  if (boundary_g)
+  {
+    boundary_g->set_time(time);
+    VectorTools::interpolate_boundary_values(dof_handler,
+                                             0,
+                                             *boundary_g,
+                                             boundary_values);
+  }
+  else
+  {
+    VectorTools::interpolate_boundary_values(dof_handler,
+                                             0,
+                                             Functions::ZeroFunction<dim>(),
+                                             boundary_values);
+  }
 
   MatrixTools::apply_boundary_values(boundary_values,
                                      system_matrix,

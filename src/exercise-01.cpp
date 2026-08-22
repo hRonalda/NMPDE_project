@@ -15,7 +15,9 @@ main(int argc, char *argv[])
    * Project 2: 2D wave equation on the fixed domain Omega = [-5, 5]^2.
    *
    *     u_tt - Lap(u) = f    in Omega
-   *     u = 0                on the boundary
+   *     u = g                on the boundary   (g = 0 for the gaussian
+   *                          case and caseA/B/C; caseD uses nonzero,
+   *                          time-dependent g)
    *     u(0)   = u0          in Omega
    *     u_t(0) = u1          in Omega
    *
@@ -49,6 +51,16 @@ main(int argc, char *argv[])
    *         cos(omega t), giving u0 = 0 and u1 = omega * S(x,y) instead
    *         of caseA's u0 = S, u1 = 0. Validates the nonzero-u1 branch
    *         of the Taylor startup for U^{-1} (docs/validation.md).
+   *
+   *     caseD
+   *         Cosine eigenmode
+   *         u = cos(a_k (x+5)) cos(a_m (y+5)) cos(omega t) with the
+   *         same eigenfrequency omega = sqrt(lambda), so f = 0 -- but
+   *         the cosines do NOT vanish on the boundary, so the Dirichlet
+   *         datum g = u|_bd is nonzero and time-dependent. Validates
+   *         the non-homogeneous boundary-condition path (per-step
+   *         elimination against g(t_{n+1}) and the g_tt(0) != 0 startup
+   *         branch), which cases A/B/C (all g = 0) cannot detect.
    *
    * For the validation cases the time step is tied to the mesh size,
    * dt ~= 0.2 h, safely below the central-difference stability limit
@@ -234,10 +246,78 @@ main(int argc, char *argv[])
 
     wave_solver.run();
   }
+  else if (test_case == "caseD")
+  {
+    /**
+     * Non-homogeneous, time-dependent Dirichlet data (derivation and
+     * sympy verification in docs/validation.md):
+     *
+     *     u(x,y,t) = cos(a_k (x+5)) cos(a_m (y+5)) cos(omega t)
+     *
+     * with omega = sqrt(lambda), so u_tt - Lap(u) = 0 (f = 0) exactly
+     * as in caseA -- but the boundary trace g = u|_bd is nonzero
+     * (e.g. +-cos(a_m (y+5)) cos(omega t) on x = -+5) and oscillates in
+     * time through a full period. Compatibility holds by construction:
+     * u0|_bd = g(0) (same function at t = 0) and u1 = 0 = g_t(0).
+     *
+     * This exercises exactly the code paths caseA/B/C cannot: the
+     * per-step boundary elimination against g(t_{n+1}) and the
+     * g_tt(0) != 0 branch of the startup (here g_tt(0) = -omega^2 g(0)).
+     */
+    const unsigned int k = 1;
+    const unsigned int m = 1;
+    const double a_k = k * numbers::PI / 10.0;
+    const double a_m = m * numbers::PI / 10.0;
+    const double lambda = a_k * a_k + a_m * a_m;
+    const double omega = std::sqrt(lambda); // eigenfrequency -> f = 0
+
+    // One full period of the exact solution. cos(omega T) = 1 at t = T,
+    // maximum amplitude: no zero-crossing artifact (unlike caseC), so
+    // the expected rates are the generic L2 = O(h^2), H1 = O(h).
+    const double final_time = 2.0 * numbers::PI / omega;
+
+    // Tie dt to h: dt = T / n_steps with n_steps chosen so dt <= 0.2 h.
+    const double h = 10.0 / (1 << n_refine);
+    const unsigned int n_steps =
+      static_cast<unsigned int>(std::ceil(final_time / (0.2 * h)));
+    const double time_step = final_time / n_steps;
+
+    std::cout << "  omega = " << omega
+              << ", T = " << final_time
+              << ", h = " << h
+              << ", dt = " << time_step
+              << " (dt/h = " << time_step / h << ")"
+              << ", n_steps = " << n_steps << std::endl;
+
+    /**
+     * Three separate instances of the same exact solution, following
+     * the caseA pattern: set_time() mutates the object, and u0, the
+     * error reference, and the boundary datum g are all evaluated at
+     * different times during the run.
+     */
+    auto exact = std::make_shared<WaveCosineExactSolution>(k, m, omega);
+    auto u0    = std::make_shared<WaveCosineExactSolution>(k, m, omega);
+    auto g     = std::make_shared<WaveCosineExactSolution>(k, m, omega);
+
+    auto u1 = std::make_shared<Functions::ZeroFunction<2>>();
+
+    Wave wave_solver(polynomial_degree,
+                     final_time,
+                     time_step,
+                     n_refine,
+                     nullptr, // f = 0
+                     u0,
+                     u1,
+                     exact,
+                     g); // non-homogeneous, time-dependent Dirichlet datum
+
+    wave_solver.run();
+  }
   else
   {
     std::cerr << "Unknown test case '" << test_case
-              << "'. Valid: gaussian, caseA, caseB, caseC." << std::endl;
+              << "'. Valid: gaussian, caseA, caseB, caseC, caseD."
+              << std::endl;
     return 1;
   }
 

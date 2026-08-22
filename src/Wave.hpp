@@ -163,21 +163,83 @@ private:
 
 
 /**
+ * Cosine eigenmode with NON-homogeneous, time-dependent Dirichlet data
+ * (case D, see docs/validation.md):
+ *
+ *     u(x,y,t) = cos(a_k (x+5)) cos(a_m (y+5)) cos(omega t)
+ *
+ * Like the sine mode, Lap(u) = -(a_k^2 + a_m^2) u, so choosing
+ * omega = sqrt(a_k^2 + a_m^2) gives u_tt - Lap(u) = 0 (f = 0). Unlike
+ * the sine mode, the cosine factors do NOT vanish on the edges of
+ * [-5,5]^2 (cos(0) = 1 at x = -5, cos(k pi) = +-1 at x = +5), so the
+ * boundary trace
+ *
+ *     g = u|_{boundary}  (nonzero, oscillating in time)
+ *
+ * is a genuine non-homogeneous, time-dependent Dirichlet datum. The
+ * same object serves as u0 (value at t = 0), as the boundary datum g
+ * (evaluated only at boundary nodes by interpolate_boundary_values),
+ * and as the error reference at the final time. Compatibility holds by
+ * construction: u0|_bd = g(0) (same function) and u1 = 0 = g_t(0)
+ * (since d/dt cos(omega t) vanishes at t = 0). Verified symbolically
+ * with sympy (PDE residual, boundary traces, compatibility).
+ */
+class WaveCosineExactSolution : public Function<2>
+{
+public:
+  WaveCosineExactSolution(const unsigned int k,
+                          const unsigned int m,
+                          const double       omega_)
+    : a_k(k * numbers::PI / 10.0)
+    , a_m(m * numbers::PI / 10.0)
+    , omega(omega_)
+  {}
+
+  virtual double
+  value(const Point<2> &p, const unsigned int /*component*/ = 0) const override
+  {
+    return std::cos(a_k * (p[0] + 5.0)) * std::cos(a_m * (p[1] + 5.0)) *
+           std::cos(omega * get_time());
+  }
+
+  // Gradient, needed for the H1 error computation.
+  virtual Tensor<1, 2>
+  gradient(const Point<2> &p,
+           const unsigned int /*component*/ = 0) const override
+  {
+    const double ct = std::cos(omega * get_time());
+
+    Tensor<1, 2> grad;
+    grad[0] = -a_k * std::sin(a_k * (p[0] + 5.0)) *
+              std::cos(a_m * (p[1] + 5.0)) * ct;
+    grad[1] = -a_m * std::cos(a_k * (p[0] + 5.0)) *
+              std::sin(a_m * (p[1] + 5.0)) * ct;
+    return grad;
+  }
+
+private:
+  const double a_k;
+  const double a_m;
+  const double omega;
+};
+
+
+/**
  * Wave equation solver for PDE Project 2.
  *
  * We solve the 2D wave equation:
  *
  *     u_tt - Δu = f    in Ω
- *     u = 0            on ∂Ω
+ *     u = g            on ∂Ω
  *     u(0) = u0        in Ω
  *     u_t(0) = u1      in Ω
  *
- * For the first working version, we use:
- *
- *     Ω = (0,1)^2
- *     f = 0
- *     u0(x,y) = x(1-x)y(1-y)
- *     u1(x,y) = 0
+ * on the fixed domain Ω = [-5, 5]^2 (see Wave::setup()). f, g, u0, u1
+ * are all pluggable through the constructor: f defaults to zero
+ * (nullptr), g defaults to homogeneous (nullptr -> g = 0). See
+ * docs/validation.md for the manufactured-solution test cases
+ * (caseA-D, covering f != 0, u1 != 0, and g != 0 respectively) and the
+ * Gaussian test case (Wave::FunctionU0 / FunctionU1) in exercise-01.cpp.
  *
  * The finite element semi-discretization gives:
  *
@@ -197,14 +259,15 @@ private:
  *     M U^{n+1}
  *       = 2 M U^n - M U^{n-1} - Δt² K U^n + Δt² F^n
  *
- * Since currently f = 0, the implemented right-hand side is:
+ * i.e. the implemented right-hand side is:
  *
- *     RHS = 2 M U^n - M U^{n-1} - Δt² K U^n
+ *     RHS = 2 M U^n - M U^{n-1} - Δt² K U^n + Δt² F^n
  *
- * Important note:
- * This version is designed to first make the simulation and ParaView output correct.
- * Later, for the final report, we can improve the initialization of U^{-1}
- * using the initial velocity and initial acceleration.
+ * with the Δt² F^n term present only when f != 0 (see Wave::assemble()).
+ * The Dirichlet datum g is imposed by algebraic elimination against the
+ * new time level (Wave::assemble()); U^{-1} is initialized to
+ * second-order accuracy from u0, u1, and the initial acceleration
+ * (Wave::run()) -- see docs/analysis.md for the full derivation of both.
  */
 class Wave
 {
@@ -276,6 +339,11 @@ public:
    * exact_      = exact solution for the error computation at the final
    *               time. Pass nullptr when no exact solution is known
    *               (e.g. the Gaussian test case).
+   * g_          = Dirichlet boundary datum u = g on the boundary,
+   *               possibly time-dependent (evaluated through
+   *               set_time()/get_time()). Pass nullptr for the
+   *               homogeneous case g = 0; all existing test cases do
+   *               this and are unaffected.
    */
   Wave(const unsigned int                             &r_,
        const double                                   &T_,
@@ -285,7 +353,8 @@ public:
                                   const double)>      &f_,
        const std::shared_ptr<Function<dim>>           &u0_,
        const std::shared_ptr<Function<dim>>           &u1_,
-       const std::shared_ptr<Function<dim>>           &exact_ = nullptr)
+       const std::shared_ptr<Function<dim>>           &exact_ = nullptr,
+       const std::shared_ptr<Function<dim>>           &g_     = nullptr)
     : r(r_)
     , T(T_)
     , delta_t(delta_t_)
@@ -294,6 +363,7 @@ public:
     , u0(u0_)
     , u1(u1_)
     , exact_solution(exact_)
+    , boundary_g(g_)
     , mpi_size(Utilities::MPI::n_mpi_processes(MPI_COMM_WORLD))
     , mpi_rank(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD))
     , mesh(MPI_COMM_WORLD)
@@ -373,6 +443,21 @@ protected:
 
   // Exact solution for validation (nullptr if unknown).
   std::shared_ptr<Function<dim>> exact_solution;
+
+  /**
+   * Dirichlet boundary datum g (nullptr means homogeneous, g = 0).
+   *
+   * Handled by symmetric algebraic elimination
+   * (MatrixTools::apply_boundary_values) against the NEW time level:
+   * in each step the constraint applies to the unknown U^{n+1}, so g is
+   * evaluated at t_{n+1}, while the load vector is evaluated at t_n
+   * (the center of the leapfrog stencil). Because the full history
+   * vectors carry the correct boundary values of earlier times, the
+   * column elimination automatically reproduces the boundary-
+   * acceleration coupling term M_IB g_tt of the constrained
+   * semi-discrete system -- see docs/analysis.md.
+   */
+  std::shared_ptr<Function<dim>> boundary_g;
 
   // MPI information.
   const unsigned int mpi_size;
